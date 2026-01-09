@@ -1,0 +1,50 @@
+services:
+  # 家計簿アプリ用データベース
+  finance-db:
+    image: postgres:15-alpine
+    container_name: finance_db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: finance_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - finance_db_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  # プロジェクト管理ツール用データベース
+  pm-db:
+    image: postgres:15-alpine
+    container_name: pm_db
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: pm_db
+    ports:
+      - "5433:5432" # ホスト側のポートをずらす
+    volumes:
+      - pm_db_data:/var/lib/postgresql/data
+    networks:
+      - app-network
+
+  # DB管理ツール (Optional)
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "8080:80"
+    networks:
+      - app-network
+
+volumes:
+  finance_db_data:
+  pm_db_data:
+
+networks:
+  app-network:
+    driver: bridge
