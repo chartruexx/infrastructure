@@ -29,6 +29,17 @@ services:
     networks:
       - app-network
 
+  # 日本株セレクターツール
+  japan-stock-selector:
+    build: ./app
+    container_name: japan_stock_selector
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ports:
+      - "8000:8000"
+    networks:
+      - app-network
+
   # DB管理ツール (Optional)
   pgadmin:
     image: dpage/pgadmin4
