@@ -1,4 +1,6 @@
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 import anthropic
 import pandas as pd
@@ -6,65 +8,66 @@ import streamlit as st
 import yfinance as yf
 
 # ─────────────────────────────────────────────
-# 定数
+# 銘柄リスト（stocks.csv から読み込む）
 # ─────────────────────────────────────────────
-STOCKS_LIST = [
-    {"ticker": "7203.T", "name": "トヨタ自動車", "sector": "自動車"},
-    {"ticker": "6758.T", "name": "ソニーグループ", "sector": "電機・精密"},
-    {"ticker": "7974.T", "name": "任天堂", "sector": "ゲーム・娯楽"},
-    {"ticker": "9432.T", "name": "日本電信電話(NTT)", "sector": "通信"},
-    {"ticker": "9433.T", "name": "KDDI", "sector": "通信"},
-    {"ticker": "9434.T", "name": "ソフトバンク", "sector": "通信"},
-    {"ticker": "9983.T", "name": "ファーストリテイリング", "sector": "小売"},
-    {"ticker": "6861.T", "name": "キーエンス", "sector": "電機・精密"},
-    {"ticker": "8306.T", "name": "三菱UFJフィナンシャル・グループ", "sector": "銀行"},
-    {"ticker": "8031.T", "name": "三井物産", "sector": "商社"},
-    {"ticker": "8001.T", "name": "伊藤忠商事", "sector": "商社"},
-    {"ticker": "4063.T", "name": "信越化学工業", "sector": "化学"},
-    {"ticker": "6367.T", "name": "ダイキン工業", "sector": "機械"},
-    {"ticker": "8035.T", "name": "東京エレクトロン", "sector": "半導体"},
-    {"ticker": "7267.T", "name": "本田技研工業", "sector": "自動車"},
-    {"ticker": "6501.T", "name": "日立製作所", "sector": "電機・精密"},
-    {"ticker": "3382.T", "name": "セブン&アイ・ホールディングス", "sector": "小売"},
-    {"ticker": "6098.T", "name": "リクルートホールディングス", "sector": "サービス"},
-    {"ticker": "4502.T", "name": "武田薬品工業", "sector": "医薬品"},
-    {"ticker": "8591.T", "name": "オリックス", "sector": "金融"},
-    {"ticker": "9020.T", "name": "JR東日本", "sector": "鉄道・運輸"},
-    {"ticker": "2914.T", "name": "日本たばこ産業(JT)", "sector": "食品・飲料"},
-    {"ticker": "6702.T", "name": "富士通", "sector": "ITサービス"},
-    {"ticker": "8473.T", "name": "SBIホールディングス", "sector": "金融"},
-    {"ticker": "2802.T", "name": "味の素", "sector": "食品・飲料"},
-]
+_CSV_PATH = Path(__file__).parent / "stocks.csv"
 
-SECTORS = sorted({s["sector"] for s in STOCKS_LIST})
+
+@st.cache_data(ttl=86400, show_spinner=False)  # 銘柄リストは24時間キャッシュ
+def _load_stocks_list() -> list[dict]:
+    df = pd.read_csv(_CSV_PATH)
+    return df.to_dict("records")
+
+
+def _get_sectors() -> list[str]:
+    return sorted({s["sector"] for s in _load_stocks_list()})
 
 
 # ─────────────────────────────────────────────
-# データ取得（プロセス全体でキャッシュ、1時間TTL）
+# yfinance 取得（1銘柄、ThreadPoolExecutor から呼ばれる）
+# ─────────────────────────────────────────────
+def _fetch_one(s: dict) -> dict | None:
+    try:
+        info = yf.Ticker(s["ticker"]).info
+        div = info.get("dividendYield")
+        return {
+            "ticker": s["ticker"],
+            "name": s["name"],
+            "sector": s["sector"],
+            "price": info.get("currentPrice") or info.get("regularMarketPrice"),
+            "per": info.get("trailingPE"),
+            "pbr": info.get("priceToBook"),
+            "dividend_yield": div,
+            "market_cap": info.get("marketCap"),
+            "week52_high": info.get("fiftyTwoWeekHigh"),
+            "week52_low": info.get("fiftyTwoWeekLow"),
+        }
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────
+# 全銘柄データ取得（5並列・1時間キャッシュ）
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_all_stocks() -> list[dict]:
-    results = []
-    for s in STOCKS_LIST:
-        try:
-            info = yf.Ticker(s["ticker"]).info
-            div = info.get("dividendYield")
-            results.append(
-                {
-                    "ticker": s["ticker"],
-                    "name": s["name"],
-                    "sector": s["sector"],
-                    "price": info.get("currentPrice") or info.get("regularMarketPrice"),
-                    "per": info.get("trailingPE"),
-                    "pbr": info.get("priceToBook"),
-                    "dividend_yield": div,
-                    "market_cap": info.get("marketCap"),
-                    "week52_high": info.get("fiftyTwoWeekHigh"),
-                    "week52_low": info.get("fiftyTwoWeekLow"),
-                }
-            )
-        except Exception:
-            pass
+    stocks_list = _load_stocks_list()
+    total = len(stocks_list)
+    results: list[dict] = []
+    progress = st.progress(0, text=f"株価データ取得中… 0 / {total} 銘柄")
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {executor.submit(_fetch_one, s): s for s in stocks_list}
+        for i, future in enumerate(as_completed(futures), start=1):
+            data = future.result()
+            if data:
+                results.append(data)
+            progress.progress(i / total, text=f"株価データ取得中… {i} / {total} 銘柄")
+
+    progress.empty()
+    # CSV の順番に合わせてソート
+    order = {s["ticker"]: idx for idx, s in enumerate(stocks_list)}
+    results.sort(key=lambda x: order.get(x["ticker"], 999))
     return results
 
 
@@ -198,7 +201,7 @@ with st.sidebar:
     st.divider()
 
     st.markdown("### 🔍 絞り込み条件")
-    sector_filter = st.selectbox("業種", ["すべて"] + SECTORS)
+    sector_filter = st.selectbox("業種", ["すべて"] + _get_sectors())
     per_max = st.number_input(
         "PER 上限（倍）",
         min_value=0.0,
